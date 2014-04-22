@@ -75,6 +75,8 @@ def processNetflow(ch, method, properties, body):
         week_start_date = date - timedelta(dow)
     month_start_date = datetime.datetime.strptime(request['timestamp_start'][:7], "%Y-%m")
 
+    if 'src_comms' not in request:
+        request['src_comms'] = ""
     community = request['src_comms']
     if community == "":
         community = "UNKNOWN"
@@ -164,7 +166,9 @@ def main(settings):
     #Setup the message queue
     exclusive = False
     durable=True
-    amqp_connection = pika.BlockingConnection(pika.ConnectionParameters(settings['amqp_server']))
+
+    credentials = pika.PlainCredentials(settings['amqp_username'], settings['amqp_password'])
+    amqp_connection = pika.BlockingConnection(pika.ConnectionParameters(settings['amqp_server'],credentials=credentials))
     amqp_channel = amqp_connection.channel()
     amqp_channel.exchange_declare(exchange=settings['amqp_user_auth_exchange'] ,type='fanout')
     amqp_channel.exchange_declare(exchange=settings['amqp_raw_netflow_exchange'] ,type='fanout')
