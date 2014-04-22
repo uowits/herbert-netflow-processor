@@ -74,6 +74,7 @@ def processNetflow(ch, method, properties, body):
         # Otherwise, subtract `dow` number days to get the first day
         week_start_date = date - timedelta(dow)
     month_start_date = datetime.datetime.strptime(request['timestamp_start'][:7], "%Y-%m")
+    year_start_date = datetime.datetime.strptime(request['timestamp_start'][:4], "%Y")
 
     if 'src_comms' not in request:
         request['src_comms'] = ""
@@ -83,15 +84,16 @@ def processNetflow(ch, method, properties, body):
     increment_dict = {"communities.%s" % community: request['bytes']}
 
     #Update the counters
-    db.user_weekly_totals.update({
+    db.user_yearly_totals.update({
             'username': user,
-            'date': week_start_date
+            'date': year_start_date
         },
         {
             "$inc": increment_dict
         },
         upsert=True
     )
+
     db.user_monthly_totals.update({
             'username': user,
             'date': month_start_date
@@ -101,6 +103,17 @@ def processNetflow(ch, method, properties, body):
         },
         upsert=True
     )
+
+    db.user_weekly_totals.update({
+            'username': user,
+            'date': week_start_date
+        },
+        {
+            "$inc": increment_dict
+        },
+        upsert=True
+    )
+
     db.user_daily_totals.update({
             'username': user,
             'date': date,
@@ -137,6 +150,16 @@ def processNetflow(ch, method, properties, body):
         },
         upsert=True
     )
+
+    db.yearly_totals.update({
+            'date': year_start_date,
+        },
+        {
+            '$inc': increment_dict
+        },
+        upsert=True
+    )
+
 
     #Ack the processing of this transaction
     ch.basic_ack(delivery_tag=method.delivery_tag)
