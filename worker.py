@@ -11,10 +11,34 @@ import time
 import datetime
 from datetime import timedelta
 import os
+# import pprint
 
 db = None #Mongo Database
 user_cache = None
 logger = None
+
+#Traffic counters
+user_counter = {}
+global_counter = {}
+
+WRITE_AFTER_SECONDS = 10 #Number of seconds to flush the local write cache
+WRITE_AFTER_RECORDS = 3000 #OR Number of records to process before flushing cache.  Whatever comes first.
+last_time_write = datetime.datetime.now()
+records_written = 0
+
+def resetCounters():
+    """
+    Resets the user and global counters
+    """
+    global global_counter
+    global user_counter
+    global last_time_write
+    global records_written
+    last_time_write = datetime.datetime.now()
+    records_written = 0
+    global_counter = {}
+    user_counter = {}
+    return
 
 def userRegistration(ch, method, properties, body):
     """
@@ -30,7 +54,121 @@ def userRegistration(ch, method, properties, body):
     logger.debug("Updating user auth cache %s with %s" % (request['username'], request['ip_address']))
     
     ch.basic_ack(delivery_tag=method.delivery_tag)
+
+def flushCaches(request):
+    """
+    Flushes the local cache and writes it to the database
+    
+    Accepts the last request
+    """    
+    global global_counter
+    global user_counter
+    # pprint.pprint(global_counter)
+    # pprint.pprint(user_counter)
+    
+    #Setup some date information for how we want to update the counters
+    date = datetime.datetime.strptime(request['timestamp_start'][:10], "%Y-%m-%d")
+    year, week, dow = date.isocalendar()
+    week_start_date = None
+    if dow == 7:
+        # Since we want to start with Sunday, let's test for that condition.
+        week_start_date = date
+    else:
+        # Otherwise, subtract `dow` number days to get the first day
+        week_start_date = date - timedelta(dow)
+    month_start_date = datetime.datetime.strptime(request['timestamp_start'][:7], "%Y-%m")
+    year_start_date = datetime.datetime.strptime(request['timestamp_start'][:4], "%Y")
+    
+    for user in user_counter:
+        increment_dict = {}
+        for community in user_counter[user]:
+            increment_dict['communities.%s' % community] = user_counter[user][community]
         
+        #Update the counters
+        #ToDo:  Turn these into bulk updates
+        db.user_yearly_totals.update({
+                'username': user,
+                'date': year_start_date
+            },
+            {
+                "$inc": increment_dict
+            },
+            upsert=True
+        )
+
+        db.user_monthly_totals.update({
+                'username': user,
+                'date': month_start_date
+            },
+            {
+                "$inc": increment_dict
+            },
+            upsert=True
+        )
+
+        db.user_weekly_totals.update({
+                'username': user,
+                'date': week_start_date
+            },
+            {
+                "$inc": increment_dict
+            },
+            upsert=True
+        )
+
+        db.user_daily_totals.update({
+                'username': user,
+                'date': date,
+            },
+            {
+                '$inc': increment_dict
+            },
+            upsert=True
+        )
+    
+    #-- Update the global counters
+    increment_dict = {}
+    for community in global_counter:
+        increment_dict['communities.%s' % community] = global_counter[community]
+    
+    db.yearly_totals.update({
+            'date': year_start_date,
+        },
+        {
+            '$inc': increment_dict
+        },
+        upsert=True
+    )
+
+    db.monthly_totals.update({
+            'date': month_start_date,
+        },
+        {
+            '$inc': increment_dict
+        },
+        upsert=True
+    )
+
+    db.weekly_totals.update({
+            'date': week_start_date,
+        },
+        {
+            '$inc': increment_dict
+        },
+        upsert=True
+    )
+
+    db.daily_totals.update({
+            'date': date,
+        },
+        {
+            '$inc': increment_dict
+        },
+        upsert=True
+    )
+
+    
+
 
 def processNetflow(ch, method, properties, body):
     """
@@ -39,6 +177,13 @@ def processNetflow(ch, method, properties, body):
     global db
     global logger
     global user_cache
+    
+    #These caches are the global counters
+    global user_counter
+    global global_counter
+    global last_time_write
+    global records_written
+    
     
     request = json.loads(body)
     
@@ -63,103 +208,31 @@ def processNetflow(ch, method, properties, body):
     db_netflow = db.processed_netflow
     db_netflow.insert(request)
 
-    #Setup some date information for how we want to update the counters
-    date = datetime.datetime.strptime(request['timestamp_start'][:10], "%Y-%m-%d")
-    year, week, dow = date.isocalendar()
-    week_start_date = None
-    if dow == 7:
-        # Since we want to start with Sunday, let's test for that condition.
-        week_start_date = date
-    else:
-        # Otherwise, subtract `dow` number days to get the first day
-        week_start_date = date - timedelta(dow)
-    month_start_date = datetime.datetime.strptime(request['timestamp_start'][:7], "%Y-%m")
-    year_start_date = datetime.datetime.strptime(request['timestamp_start'][:4], "%Y")
-
     if 'src_comms' not in request:
         request['src_comms'] = ""
     community = request['src_comms']
     if community == "":
         community = "UNKNOWN"
-    increment_dict = {"communities.%s" % community: request['bytes']}
 
-    #Update the counters
-    db.user_yearly_totals.update({
-            'username': user,
-            'date': year_start_date
-        },
-        {
-            "$inc": increment_dict
-        },
-        upsert=True
-    )
-
-    db.user_monthly_totals.update({
-            'username': user,
-            'date': month_start_date
-        },
-        {
-            "$inc": increment_dict
-        },
-        upsert=True
-    )
-
-    db.user_weekly_totals.update({
-            'username': user,
-            'date': week_start_date
-        },
-        {
-            "$inc": increment_dict
-        },
-        upsert=True
-    )
-
-    db.user_daily_totals.update({
-            'username': user,
-            'date': date,
-        },
-        {
-            '$inc': increment_dict
-        },
-        upsert=True
-    )
+    #-- Update the caches
+    #Create a new user if one does not already exist
+    if user not in user_counter:
+        user_counter[user] = {}
+    if community not in user_counter[user]:
+        user_counter[user][community] = 0L
+    if community not in global_counter:
+        global_counter[community] = 0L
     
-    db.daily_totals.update({
-            'date': date,
-        },
-        {
-            '$inc': increment_dict
-        },
-        upsert=True
-    )
-
-    db.weekly_totals.update({
-            'date': week_start_date,
-        },
-        {
-            '$inc': increment_dict
-        },
-        upsert=True
-    )
-
-    db.monthly_totals.update({
-            'date': month_start_date,
-        },
-        {
-            '$inc': increment_dict
-        },
-        upsert=True
-    )
-
-    db.yearly_totals.update({
-            'date': year_start_date,
-        },
-        {
-            '$inc': increment_dict
-        },
-        upsert=True
-    )
-
+    #Actually update the caches
+    user_counter[user][community] += request['bytes']
+    global_counter[community] += request['bytes']
+    
+    records_written += 1
+    time_passed = (datetime.datetime.now() - last_time_write).seconds
+    # print time_passed
+    if (records_written > WRITE_AFTER_RECORDS) or (time_passed > WRITE_AFTER_SECONDS):
+        flushCaches(request) #Update the caches.  Pass the last request in here for the date time stuff.
+        resetCounters()
 
     #Ack the processing of this transaction
     ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -175,7 +248,9 @@ def main(settings):
 
     logger.debug("Starting main function..")
     
+    #Clear our local caches ready for a hard day of work
     user_cache = {}
+    resetCounters() 
     
     #Setup the MongoDB Connection
     mongo_client = MongoClient(settings['mongodb_server'], 27017)
