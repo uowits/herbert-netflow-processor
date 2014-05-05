@@ -206,7 +206,7 @@ def processNetflow(ch, method, properties, body):
     logger.debug("Processing Netflow %s" % str(request))
     
     db_netflow = db.processed_netflow
-    db_netflow.insert(request)
+    # db_netflow.insert(request)
 
     if 'src_comms' not in request:
         request['src_comms'] = ""
