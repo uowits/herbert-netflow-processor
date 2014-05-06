@@ -11,8 +11,7 @@ import time
 import datetime
 from datetime import timedelta
 import os
-# import pprint
-
+ 
 db = None #Mongo Database
 user_cache = None
 logger = None
@@ -20,9 +19,10 @@ logger = None
 #Traffic counters
 user_counter = {}
 global_counter = {}
+netflow_data = []
 
-WRITE_AFTER_SECONDS = 10 #Number of seconds to flush the local write cache
-WRITE_AFTER_RECORDS = 3000 #OR Number of records to process before flushing cache.  Whatever comes first.
+WRITE_AFTER_SECONDS = 30 #Number of seconds to flush the local write cache
+WRITE_AFTER_RECORDS = 10000 #OR Number of records to process before flushing cache.  Whatever comes first.
 last_time_write = datetime.datetime.now()
 records_written = 0
 
@@ -34,10 +34,13 @@ def resetCounters():
     global user_counter
     global last_time_write
     global records_written
+    global netflow_data
+    
     last_time_write = datetime.datetime.now()
     records_written = 0
     global_counter = {}
     user_counter = {}
+    netflow_data = []
     return
 
 def userRegistration(ch, method, properties, body):
@@ -63,8 +66,11 @@ def flushCaches(request):
     """    
     global global_counter
     global user_counter
-    # pprint.pprint(global_counter)
-    # pprint.pprint(user_counter)
+    global netflow_data
+    global db
+    
+    db_netflow = db.processed_netflow
+    db_netflow.insert(netflow_data)
     
     #Setup some date information for how we want to update the counters
     date = datetime.datetime.strptime(request['timestamp_start'][:10], "%Y-%m-%d")
@@ -79,45 +85,90 @@ def flushCaches(request):
     month_start_date = datetime.datetime.strptime(request['timestamp_start'][:7], "%Y-%m")
     year_start_date = datetime.datetime.strptime(request['timestamp_start'][:4], "%Y")
     
-    for user in user_counter:
-        increment_dict = {}
-        for community in user_counter[user]:
-            increment_dict['communities.%s' % community] = user_counter[user][community]
+    if( len(user_counter) > 0 ):
+        bulk_user_daily_totals = db.user_daily_totals.initialize_ordered_bulk_op()
+        bulk_user_monthly_totals = db.user_monthly_totals.initialize_ordered_bulk_op()
+        bulk_user_weekly_totals = db.user_weekly_totals.initialize_ordered_bulk_op()
+        bulk_user_yearly_totals = db.user_yearly_totals.initialize_ordered_bulk_op()
+    
+        for user in user_counter:
+            increment_dict = {}
+            for community in user_counter[user]:
+                increment_dict['communities.%s' % community] = user_counter[user][community]
         
-        #Update the counters
-        #ToDo:  Turn these into bulk updates
-        db.user_yearly_totals.update({
-                'username': user,
-                'date': year_start_date
+            #Update the counters
+            #ToDo:  Turn these into bulk updates
+            bulk_user_yearly_totals.find({
+                    'username': user,
+                    'date': year_start_date
+                }).upsert().update(
+                {
+                    "$inc": increment_dict
+                })
+
+            bulk_user_monthly_totals.find({
+                    'username': user,
+                    'date': month_start_date
+                }).upsert().update(
+                {
+                    "$inc": increment_dict
+                })
+
+            bulk_user_weekly_totals.find({
+                    'username': user,
+                    'date': week_start_date
+                }).upsert().update(
+                {
+                    "$inc": increment_dict
+                })
+
+            bulk_user_daily_totals.find({
+                    'username': user,
+                    'date': date,
+                }).upsert().update(
+                {
+                    '$inc': increment_dict
+                })
+        
+        bulk_user_daily_totals.execute()
+        bulk_user_monthly_totals.execute()
+        bulk_user_weekly_totals.execute()
+        bulk_user_yearly_totals.execute()
+    
+    if( len(global_counter) > 0 ):
+        #-- Update the global counters
+        increment_dict = {}
+        for community in global_counter:
+            increment_dict['communities.%s' % community] = global_counter[community]
+    
+        db.yearly_totals.update({
+                'date': year_start_date,
             },
             {
-                "$inc": increment_dict
+                '$inc': increment_dict
             },
             upsert=True
         )
 
-        db.user_monthly_totals.update({
-                'username': user,
-                'date': month_start_date
+        db.monthly_totals.update({
+                'date': month_start_date,
             },
             {
-                "$inc": increment_dict
+                '$inc': increment_dict
             },
             upsert=True
         )
 
-        db.user_weekly_totals.update({
-                'username': user,
-                'date': week_start_date
+        db.weekly_totals.update({
+                'date': week_start_date,
             },
             {
-                "$inc": increment_dict
+                '$inc': increment_dict
             },
             upsert=True
         )
 
-        db.user_daily_totals.update({
-                'username': user,
+        db.daily_totals.update({
                 'date': date,
             },
             {
@@ -125,50 +176,6 @@ def flushCaches(request):
             },
             upsert=True
         )
-    
-    #-- Update the global counters
-    increment_dict = {}
-    for community in global_counter:
-        increment_dict['communities.%s' % community] = global_counter[community]
-    
-    db.yearly_totals.update({
-            'date': year_start_date,
-        },
-        {
-            '$inc': increment_dict
-        },
-        upsert=True
-    )
-
-    db.monthly_totals.update({
-            'date': month_start_date,
-        },
-        {
-            '$inc': increment_dict
-        },
-        upsert=True
-    )
-
-    db.weekly_totals.update({
-            'date': week_start_date,
-        },
-        {
-            '$inc': increment_dict
-        },
-        upsert=True
-    )
-
-    db.daily_totals.update({
-            'date': date,
-        },
-        {
-            '$inc': increment_dict
-        },
-        upsert=True
-    )
-
-    
-
 
 def processNetflow(ch, method, properties, body):
     """
@@ -183,6 +190,7 @@ def processNetflow(ch, method, properties, body):
     global global_counter
     global last_time_write
     global records_written
+    global netflow_data
     
     
     request = json.loads(body)
@@ -205,14 +213,13 @@ def processNetflow(ch, method, properties, body):
     request['user'] = user
     logger.debug("Processing Netflow %s" % str(request))
     
-    db_netflow = db.processed_netflow
-    # db_netflow.insert(request)
-
     if 'src_comms' not in request:
         request['src_comms'] = ""
     community = request['src_comms']
     if community == "":
         community = "UNKNOWN"
+
+    netflow_data.append(request)
 
     #-- Update the caches
     #Create a new user if one does not already exist
@@ -276,7 +283,7 @@ def main(settings):
     personal_queue_name = amqp_channel.queue_declare(exclusive=True).method.queue
     
     #Setup the basic consume settings so we don't try and process too much at a time
-    amqp_channel.basic_qos(prefetch_count=5)
+    amqp_channel.basic_qos(prefetch_count=8)
 
     #Bind to the queues and start consuming
     amqp_channel.queue_bind(exchange=settings['amqp_raw_netflow_exchange'], queue=settings['amqp_raw_netflow_queue'])
