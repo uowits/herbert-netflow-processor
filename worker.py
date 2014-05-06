@@ -86,10 +86,10 @@ def flushCaches(request):
     year_start_date = datetime.datetime.strptime(request['timestamp_start'][:4], "%Y")
     
     if( len(user_counter) > 0 ):
-        bulk_user_daily_totals = db.user_daily_totals.initialize_ordered_bulk_op()
-        bulk_user_monthly_totals = db.user_monthly_totals.initialize_ordered_bulk_op()
-        bulk_user_weekly_totals = db.user_weekly_totals.initialize_ordered_bulk_op()
-        bulk_user_yearly_totals = db.user_yearly_totals.initialize_ordered_bulk_op()
+        bulk_user_daily_totals = db.user_daily_totals.initialize_unordered_bulk_op()
+        bulk_user_monthly_totals = db.user_monthly_totals.initialize_unordered_bulk_op()
+        bulk_user_weekly_totals = db.user_weekly_totals.initialize_unordered_bulk_op()
+        bulk_user_yearly_totals = db.user_yearly_totals.initialize_unordered_bulk_op()
     
         for user in user_counter:
             increment_dict = {}
